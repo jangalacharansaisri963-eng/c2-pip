@@ -7,7 +7,9 @@ build-backend = "setuptools.build_meta"
 name = "c2pip"
 version = "0.1.0"
 description = "Buildozer-grade automation tool for compiling and publishing native C extensions directly to PyPI."
+requires-python = ">=3.8"
 readme = "README.md"
+requires-python = ">=3.8"
 authors = [
     { name = "Dan Studios" }
 ]
