@@ -1,0 +1,46 @@
+# pyproject.toml
+[build-system]
+requires = ["setuptools>=68.0.0", "wheel>=0.40.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "c2pip"
+version = "0.1.0"
+description = "Buildozer-grade automation tool for compiling and publishing native C extensions directly to PyPI."
+readme = "README.md"
+authors = [
+    { name = "Dan Studios" }
+]
+license = { text = "MIT" }
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: C",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Build Tools",
+    "Topic :: Software Development :: Libraries :: Application Frameworks"
+]
+keywords = ["c-extensions", "ffi", "buildozer", "pypi", "packaging", "native"]
+dependencies = [
+    "setuptools>=68.0.0",
+    "wheel>=0.40.0",
+    "build>=1.0.0",
+    "twine>=4.0.0"
+]
+
+[project.urls]
+Homepage = "https://github.com/github/c2pip"
+Repository = "https://github.com/github/c2pip.git"
+
+[project.scripts]
+c2pip = "c2pip.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["c2pip", "c2pip.*"]
