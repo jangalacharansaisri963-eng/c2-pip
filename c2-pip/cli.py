@@ -10,10 +10,9 @@ from pathlib import Path
 from typing import Sequence
 
 from .builder import BuildError, build_project
-from .generator import ProjectGenerator
-from .publisher import PublishError, publish_project
+from .generator import GenerationError, ProjectGenerator
+from .publisher import PublishError, check_project, publish_project
 from .scanner import ScanError, scan_file
-
 
 VERSION = "0.1.0"
 
@@ -43,17 +42,9 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="COMMAND",
     )
 
-    # ---------------------------------------------------------
-    # init
-    # ---------------------------------------------------------
-
     init_parser = subparsers.add_parser(
         "init",
         help="Create a c2pip project from a C source/header file.",
-        description=(
-            "Scan a C file, generate a Python extension wrapper, "
-            "and create the package project."
-        ),
     )
 
     init_parser.add_argument(
@@ -79,14 +70,10 @@ def build_parser() -> argparse.ArgumentParser:
         "-o",
         type=Path,
         default=Path("."),
-        help="Output project directory. Defaults to the current directory.",
+        help="Output directory.",
     )
 
     init_parser.set_defaults(func=command_init)
-
-    # ---------------------------------------------------------
-    # build
-    # ---------------------------------------------------------
 
     build_parser = subparsers.add_parser(
         "build",
@@ -94,22 +81,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     build_parser.add_argument(
-        "--sdist",
+        "--clean",
         action="store_true",
-        help="Build both wheel and source distribution.",
+        help="Remove previous build artifacts first.",
     )
 
     build_parser.add_argument(
-        "--clean",
+        "--verbose",
+        "-v",
         action="store_true",
-        help="Remove previous build artifacts before building.",
+        help="Show detailed build information.",
     )
 
     build_parser.set_defaults(func=command_build)
-
-    # ---------------------------------------------------------
-    # publish
-    # ---------------------------------------------------------
 
     publish_parser = subparsers.add_parser(
         "publish",
@@ -118,28 +102,35 @@ def build_parser() -> argparse.ArgumentParser:
 
     publish_parser.add_argument(
         "--repository",
+        choices=("pypi", "testpypi"),
         default="pypi",
-        help=(
-            "Twine repository name. Defaults to 'pypi'. "
-            "Use a configured repository such as 'testpypi' when needed."
-        ),
+        help="Repository to upload to.",
     )
 
     publish_parser.add_argument(
         "--skip-check",
         action="store_true",
-        help="Skip 'twine check' before uploading.",
+        help="Skip distribution validation.",
+    )
+
+    publish_parser.add_argument(
+        "--token",
+        default=None,
+        help="PyPI API token.",
+    )
+
+    publish_parser.add_argument(
+        "--verbose",
+        "-v",
+        action="store_true",
+        help="Show detailed publishing information.",
     )
 
     publish_parser.set_defaults(func=command_publish)
 
-    # ---------------------------------------------------------
-    # new
-    # ---------------------------------------------------------
-
     new_parser = subparsers.add_parser(
         "new",
-        help="Create an empty C-to-Python project.",
+        help="Create an empty c2pip project.",
     )
 
     new_parser.add_argument(
@@ -158,14 +149,10 @@ def build_parser() -> argparse.ArgumentParser:
         "-o",
         type=Path,
         default=Path("."),
-        help="Parent directory. Defaults to the current directory.",
+        help="Parent directory.",
     )
 
     new_parser.set_defaults(func=command_new)
-
-    # ---------------------------------------------------------
-    # clean
-    # ---------------------------------------------------------
 
     clean_parser = subparsers.add_parser(
         "clean",
@@ -178,35 +165,96 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def command_init(args: argparse.Namespace) -> int:
-    source: Path = args.source
+    source = args.source.resolve()
 
     if not source.exists():
-        raise CLIError(f"Source file does not exist: {source}")
+        raise CLIError(
+            f"Source file does not exist: {source}"
+        )
 
     if not source.is_file():
-        raise CLIError(f"Source path is not a file: {source}")
+        raise CLIError(
+            f"Source path is not a file: {source}"
+        )
+
+    allowed_extensions = {
+        ".h",
+        ".c",
+        ".cc",
+        ".cpp",
+        ".cxx",
+    }
+
+    if source.suffix.lower() not in allowed_extensions:
+        raise CLIError(
+            "Source must be a C or C++ source/header file."
+        )
+
+    output_root = args.output.resolve()
+    output_root.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    project_dir = (
+        output_root
+        / _normalize_package_name(args.name)
+    )
+
+    if project_dir.exists():
+        raise CLIError(
+            f"Project directory already exists: {project_dir}"
+        )
 
     print(f"Scanning {source}...")
 
-    functions = scan_file(source)
+    try:
+        functions = scan_file(source)
+    except ScanError:
+        raise
+    except Exception as exc:
+        raise CLIError(
+            f"Failed to scan {source}: {exc}"
+        ) from exc
 
-    print(f"Found {len(functions)} function(s).")
+    print(
+        f"Found {len(functions)} function(s)."
+    )
 
     generator = ProjectGenerator(
         name=args.name,
         author=args.author,
         functions=functions,
         source_file=source.name,
-        output_dir=args.output,
+        output_dir=project_dir,
     )
 
-    project_dir = generator.generate()
+    try:
+        generated_dir = generator.generate()
+    except GenerationError:
+        raise
+    except Exception as exc:
+        raise CLIError(
+            f"Failed to generate project: {exc}"
+        ) from exc
+
+    destination_source = (
+        generated_dir / source.name
+    )
+
+    if source.resolve() != destination_source.resolve():
+        shutil.copy2(
+            source,
+            destination_source,
+        )
 
     print()
-    print(f"✓ Project created: {project_dir}")
+    print(
+        f"✓ Project created: {generated_dir}"
+    )
     print()
     print("Next steps:")
-    print(f"  cd {project_dir}")
+    print(f"  cd {generated_dir}")
     print("  c2pip build")
     print("  c2pip publish")
 
@@ -216,14 +264,14 @@ def command_init(args: argparse.Namespace) -> int:
 def command_build(args: argparse.Namespace) -> int:
     project_dir = Path.cwd()
 
-    if args.clean:
-        _clean_build_artifacts(project_dir)
+    print(
+        f"Building project in {project_dir}..."
+    )
 
-    print("Building project...")
-
-    build_project(
+    wheels = build_project(
         project_dir=project_dir,
-        build_sdist=args.sdist,
+        clean=args.clean,
+        verbose=args.verbose,
     )
 
     print()
@@ -233,51 +281,97 @@ def command_build(args: argparse.Namespace) -> int:
         f"{project_dir / 'dist'}"
     )
 
+    for wheel in wheels:
+        print(f"  → {wheel.name}")
+
     return 0
 
 
 def command_publish(args: argparse.Namespace) -> int:
     project_dir = Path.cwd()
-
     dist_dir = project_dir / "dist"
 
-    if not dist_dir.exists():
+    if not dist_dir.is_dir():
         raise CLIError(
             "dist/ does not exist. Run 'c2pip build' first."
         )
 
-    print("Publishing project...")
+    distributions = [
+        path
+        for path in dist_dir.iterdir()
+        if path.is_file()
+        and path.suffix in {
+            ".whl",
+            ".gz",
+            ".zip",
+        }
+    ]
+
+    if not distributions:
+        raise CLIError(
+            "No distributions were found in dist/. "
+            "Run 'c2pip build' first."
+        )
+
+    if not args.skip_check:
+        print("Checking distributions...")
+        check_project(project_dir)
+
+    print()
+    print(
+        f"Publishing to {args.repository}..."
+    )
 
     publish_project(
         project_dir=project_dir,
         repository=args.repository,
-        skip_check=args.skip_check,
+        token=args.token,
+        verbose=args.verbose,
     )
 
     print()
-    print("✓ Package published successfully.")
+    print(
+        "✓ Package published successfully."
+    )
 
     return 0
 
 
 def command_new(args: argparse.Namespace) -> int:
-    output_root: Path = args.output.resolve()
-    project_dir = output_root / args.name
+    output_root = args.output.resolve()
+    project_name = args.name.strip()
+
+    if not project_name:
+        raise CLIError(
+            "Project name cannot be empty."
+        )
+
+    package_name = _normalize_package_name(
+        project_name
+    )
+
+    project_dir = (
+        output_root / project_name
+    )
 
     if project_dir.exists():
         raise CLIError(
             f"Directory already exists: {project_dir}"
         )
 
-    project_dir.mkdir(parents=True)
+    project_dir.mkdir(
+        parents=True
+    )
 
-    package_name = _normalize_package_name(args.name)
+    package_dir = (
+        project_dir / package_name
+    )
 
-    (project_dir / package_name).mkdir()
+    package_dir.mkdir()
 
     _write_text(
         project_dir / "README.md",
-        f"""# {args.name}
+        f"""# {project_name}
 
 Python bindings for a native C library generated with c2pip.
 
@@ -286,25 +380,31 @@ Python bindings for a native C library generated with c2pip.
 Build the package with:
 
     c2pip build
+
+## Installation
+
+    pip install .
 """,
     )
 
     _write_text(
         project_dir / "c2pip.spec",
         f"""[project]
-name = {args.name}
+name = {project_name}
 version = 0.1.0
 author = {args.author}
 """,
     )
 
     _write_text(
-        project_dir / package_name / "__init__.py",
+        package_dir / "__init__.py",
         """from . import _core
 
 __all__ = [
     "_core",
 ]
+
+__version__ = "0.1.0"
 """,
     )
 
@@ -325,7 +425,41 @@ dist/
 """,
     )
 
-    print(f"✓ Created new project: {project_dir}")
+    _write_text(
+        project_dir / "example.c",
+        """#include "example.h"
+
+int add(int a, int b)
+{
+    return a + b;
+}
+""",
+    )
+
+    _write_text(
+        project_dir / "example.h",
+        """#ifndef EXAMPLE_H
+#define EXAMPLE_H
+
+int add(int a, int b);
+
+#endif
+""",
+    )
+
+    print(
+        f"✓ Created new project: {project_dir}"
+    )
+
+    print()
+    print("Next steps:")
+    print(f"  cd {project_dir}")
+    print(
+        "  c2pip init example.h "
+        f"--name {project_name} "
+        f'--author "{args.author}"'
+    )
+    print("  c2pip build")
 
     return 0
 
@@ -333,17 +467,25 @@ dist/
 def command_clean(args: argparse.Namespace) -> int:
     project_dir = Path.cwd()
 
-    removed = _clean_build_artifacts(project_dir)
+    removed = _clean_build_artifacts(
+        project_dir
+    )
 
     if removed:
-        print("✓ Cleaned build artifacts.")
+        print(
+            "✓ Cleaned build artifacts."
+        )
     else:
-        print("Nothing to clean.")
+        print(
+            "Nothing to clean."
+        )
 
     return 0
 
 
-def _clean_build_artifacts(project_dir: Path) -> bool:
+def _clean_build_artifacts(
+    project_dir: Path,
+) -> bool:
     targets = (
         "build",
         "dist",
@@ -360,8 +502,13 @@ def _clean_build_artifacts(project_dir: Path) -> bool:
         if path.is_dir():
             shutil.rmtree(path)
             removed = True
+        else:
+            path.unlink()
+            removed = True
 
-    for path in project_dir.glob("*.egg-info"):
+    for path in project_dir.glob(
+        "*.egg-info"
+    ):
         if path.is_dir():
             shutil.rmtree(path)
             removed = True
@@ -369,37 +516,67 @@ def _clean_build_artifacts(project_dir: Path) -> bool:
     return removed
 
 
-def _normalize_package_name(name: str) -> str:
+def _normalize_package_name(
+    name: str,
+) -> str:
     package_name = re.sub(
         r"[-.]+",
         "_",
         name.strip(),
     ).lower()
 
+    package_name = re.sub(
+        r"[^a-zA-Z0-9_]",
+        "_",
+        package_name,
+    )
+
     if not package_name:
-        raise CLIError("Package name cannot be empty.")
+        raise CLIError(
+            "Package name cannot be empty."
+        )
+
+    if package_name[0].isdigit():
+        package_name = "_" + package_name
 
     return package_name
 
 
-def _write_text(path: Path, content: str) -> None:
+def _write_text(
+    path: Path,
+    content: str,
+) -> None:
+    path.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
     path.write_text(
         content.rstrip() + "\n",
         encoding="utf-8",
     )
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def main(
+    argv: Sequence[str] | None = None,
+) -> int:
     parser = build_parser()
 
     try:
         args = parser.parse_args(argv)
+
+        if not hasattr(args, "func"):
+            parser.error(
+                "a command is required"
+            )
+
         return args.func(args)
 
     except (
         CLIError,
         ScanError,
         BuildError,
+        GenerationError,
         PublishError,
         ValueError,
     ) as exc:
@@ -418,4 +595,6 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(
+        main()
+    )
